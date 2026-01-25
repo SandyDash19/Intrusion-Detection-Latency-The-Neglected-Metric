@@ -57,12 +57,15 @@ For each successfully detected attack subsegment, ADL is computed as:
 
 The Attack Detection Latency is computed as:
 
+## Attack Detection Latency (ADL)
+
 ```math
 \mathrm{ADL}_{ms}
 =
 \left( \mathrm{ACT}_{detected} - \mathrm{ACT}_{start} \right)_{ms}
 +
 k \cdot \mathrm{INF}_{const,ms}
+
 ​
 where:
 
