@@ -6,8 +6,8 @@ This repository contains code to compute Attack Detection Latency (ADL) for netw
 The implementation supports per-attack-instance latency analysis, enabling evaluation beyond traditional accuracy-only metrics.
 
 **Instructions to use this repo**
-Download dataset: https://zenodo.org/records/18364329
-Add path to the dataset in the ADL_ROSPaCe.py
+Download dataset: https://zenodo.org/records/18364329 .
+Add path to the dataset in the ADL_ROSPaCe.py .
 This is ROSPaCe dataset after three feature engineering steps described in our paper.
 
 **Overview**
