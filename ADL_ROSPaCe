@@ -1,0 +1,570 @@
+"""
+Attack Detection Latency calculation using
+dataset: ROSPaCe, feature engineering is already performed. Feature engineering details
+         are mentioned in the paper.
+classifier: Extreme Gradient Boosting Algorithm XGBoost 
+
+Types of attack categories and labels:
+Label    Attack Category
+0       Observe
+1       namp_discovery
+2       ros2_node_crashing
+3       ros2_reconnaissance
+4       ros2_reflection
+5       namp_SYN_flood
+6       metasploit_SYN_flood
+
+Subsegments in test set: 194
+Datapoints in test set: 2,315,344 (2.3 million)
+
+This script trains an XGBoost binary classifier (observe vs attack) and evaluates:
+  - binary accuracy metrics on the test set
+  - per-attack-category datapoint-level "accuracy" (TPR/recall per original class)
+  - per-attack-subsegment detection index (det_idx)
+  - Attack Detection Latency (ADL) per detected attack subsegment:
+
+      ADL_ms = (ACT_detected - ACT_start)_ms + k * INF_const_ms_per_point
+
+where:
+  - ACT_* timestamps come from the dataset and are converted to milliseconds
+  - k is the number of datapoints from attack start to first detected datapoint (inclusive)
+  - INF_const is a constant inference time per datapoint estimated from throughput
+
+Outputs:
+  (1) test_data_with_predictions.csv 
+  This file has all of the test datapoints, timestamp, features, ground truth attack
+  labels, prediction and prediction probabilities. The csv has 2.3 millon rows.
+
+  (2) subseg_label_detidx.csv
+  This file has attack subsegment_id in test set with attack category labels and its
+  respective detection index. Each attack subsegment can have hundreds of thousands of datapoints.
+  At which datapoint the attack was first detected is recorded as detection index.
+
+  (3) detection_events.csv
+  This file calculates ACT_latency meaning the difference of timestamps when the exploit
+  got detected to when it had first started and adds the total inference time for all the packets
+  that were processed from the start of the attack to the detection point.
+
+  The XGBoost model fails to detect any attacks under categories: ros2_node_crashing and ros2_reflection
+  Therefore columns with respect to those attacks are empty. 
+
+  The code prints a stats summary table with the following format
+    class_name  - Attack category
+    accuracy_percent  - accuracy per attack class
+    total_subsegments  - total subsegments for the attack class
+    detected_subsegments  - detected subsegment for the attack class
+    inf_const_us_per_point  - Inference time per packet is calculated by calculating inference
+                            time for a chunk of packets and then averaging over 5 iterations.
+                            Per packet inference time should be a constant because features are same
+                            for each packet.  
+    avg_adl    - average Attack Detection Latency per attack category when the attack is successfully detected
+    max_adl    - maximum Attack Detection Latency per attack category when the attack is successfully detected
+    std_adl    - standard deviation of Attack Detection Latency per attack category when the attack is successfully detected
+
+"""
+
+from __future__ import annotations
+
+import os
+import time
+from dataclasses import dataclass
+from typing import Dict, List, Tuple
+
+import numpy as np
+import pandas as pd
+import xgboost as xgb
+from sklearn.metrics import accuracy_score, classification_report, confusion_matrix
+
+
+# -----------------------------
+# Configuration
+# -----------------------------
+@dataclass(frozen=True)
+class Paths:
+    input_folder: str = "/home/sandy/Cybersecurity/ROSPaCe_dataset_attackSpecificInsights/Task2_input"
+    out_predictions_csv: str = "/home/sandy/Cybersecurity/ROSPaCe_dataset_attackSpecificInsights/test_data_with_predictions.csv"
+    out_detidx_csv: str = "/home/sandy/Cybersecurity/ROSPaCe_dataset_attackSpecificInsights/subseg_label_detidx.csv"
+    out_events_csv: str = "/home/sandy/Cybersecurity/ROSPaCe_dataset_attackSpecificInsights/detection_events.csv"
+
+
+@dataclass(frozen=True)
+class TrainConfig:
+    threshold: float = 0.5
+    train_file_numbers: Tuple[int, ...] = (0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 12, 13, 14)
+
+
+@dataclass(frozen=True)
+class InfConfig:
+    repeats: int = 5
+    warmup_rows: int = 1024
+
+
+# -----------------------------
+# Utilities
+# -----------------------------
+def _safe_div(num: float, den: float) -> float:
+    return num / den if den else 0.0
+
+
+def _format_latency(ms: float, ms_decimals: int = 3) -> str:
+    """
+    Human-readable latency formatting:
+      - display in ms if it does not round to 0.000 ms
+      - otherwise display in microseconds (µs)
+
+    This avoids misleading '0.000 ms' when the value is non-zero but very small.
+    """
+    if ms is None or (isinstance(ms, float) and np.isnan(ms)):
+        return "N/A"
+
+    # If rounding in ms would show 0.000, switch to µs
+    if round(ms, ms_decimals) == 0.0 and ms > 0:
+        us = ms * 1000.0
+        return f"{us:.3f} µs"
+    return f"{ms:.{ms_decimals}f} ms"
+
+
+# -----------------------------
+# Data I/O
+# -----------------------------
+def load_folder_csvs(folder_path: str) -> pd.DataFrame:
+    """
+    Load and concatenate CSV files from a folder.
+    Expects file naming like: rospace_reduced_<file_number>_T2.csv
+    Adds `file_number` column parsed from the filename.
+    """
+    dfs: List[pd.DataFrame] = []
+
+    for file_name in os.listdir(folder_path):
+        if not file_name.endswith(".csv"):
+            continue
+
+        try:
+            file_number = int(file_name.split("_")[2])
+        except (IndexError, ValueError):
+            print(f"Skipping file (cannot parse file_number): {file_name}")
+            continue
+
+        file_path = os.path.join(folder_path, file_name)
+        df = pd.read_csv(file_path)
+        df["file_number"] = file_number
+        dfs.append(df)
+
+    if not dfs:
+        raise FileNotFoundError(f"No CSV files loaded from: {folder_path}")
+
+    return pd.concat(dfs, ignore_index=True)
+
+
+def split_data(data: pd.DataFrame, cfg: TrainConfig, debug: bool = True) -> Tuple[pd.DataFrame, pd.Series, pd.DataFrame, pd.Series, pd.DataFrame, pd.Series]:
+    """
+    Split dataset into train/val/test using the `set_label` column.
+
+    Training/validation:
+      - binary label: attack = 1 if original attack > 0, else 0
+
+    Test:
+      - preserve original multiclass labels (0..6) for per-class latency analysis
+    """
+    train_data = data[(data["set_label"] == "train") & (data["file_number"].isin(set(cfg.train_file_numbers)))].copy()
+    val_data = data[data["set_label"] == "val"].copy()
+    test_data = data[data["set_label"] == "test"].copy()
+
+    # Binary labels for train/val
+    train_data["attack"] = (train_data["attack"] > 0).astype(int)
+    val_data["attack"] = (val_data["attack"] > 0).astype(int)
+
+    X_train = train_data.drop(columns=["attack", "set_label", "timestamp", "file_number"])
+    y_train = train_data["attack"]
+
+    X_val = val_data.drop(columns=["attack", "set_label", "timestamp", "file_number"])
+    y_val = val_data["attack"]
+
+    X_test = test_data.drop(columns=["attack", "set_label", "timestamp", "file_number"])
+    y_test = test_data["attack"]  # keep 0..6
+
+    if debug:
+        print(f"\nTest size: {len(X_test)}")
+        subsegment_ids = (y_test != y_test.shift()).cumsum()
+        grouped = pd.DataFrame({"class": y_test, "segment": subsegment_ids})
+        counts = grouped.groupby("segment").first()["class"].value_counts().sort_index()
+        print(f"Total subsegments: {subsegment_ids.nunique()}")
+        print("Subsegments per class:")
+        for cls, count in counts.items():
+            label = "Observe" if cls == 0 else f"Attack {cls}"
+            print(f"  {label}: {count}")
+
+    return X_train, y_train, X_val, y_val, X_test, y_test
+
+
+# -----------------------------
+# Model
+# -----------------------------
+def train_xgb(X_train: pd.DataFrame, y_train: pd.Series, X_val: pd.DataFrame, y_val: pd.Series) -> xgb.XGBClassifier:
+    """
+    Train an XGBoost binary classifier using GPU prediction.
+    """
+    model = xgb.XGBClassifier(
+        n_estimators=231,
+        objective="binary:logistic",
+        subsample=0.6001940399278941,
+        colsample_bytree=0.7978003388757504,  # FIXED: correct parameter name
+        early_stopping_rounds=62,
+        eval_metric="logloss",
+        max_depth=3,
+        base_score=0.5,
+        learning_rate=0.04703726511761086,
+        reg_alpha=0.33832672084343324,
+        reg_lambda=1.5796142731385946e-06,
+        min_child_weight=2,
+        tree_method="hist",
+        device="cuda",
+        predictor="gpu_predictor",
+    )
+    model.fit(X_train, y_train, eval_set=[(X_val, y_val)], verbose=True)
+    return model
+
+
+def evaluate_model(
+    model: xgb.XGBClassifier,
+    X_test: pd.DataFrame,
+    y_test_multiclass: pd.Series,
+    threshold: float,
+    full_data: pd.DataFrame,
+    out_predictions_csv: str,
+) -> np.ndarray:
+    """
+    Evaluate binary decision using a custom threshold.
+    Saves a CSV containing test rows + predicted label + predicted probability.
+    """
+    probs = model.predict_proba(X_test)[:, 1]
+    y_pred = (probs >= threshold).astype(int)
+
+    y_true_bin = (y_test_multiclass > 0).astype(int)
+
+    acc = accuracy_score(y_true_bin, y_pred)
+    cm = confusion_matrix(y_true_bin, y_pred)
+    tn, fp, fn, tp = cm.ravel()
+    fpr = _safe_div(fp, fp + tn)
+    fnr = _safe_div(fn, fn + tp)
+
+    print(f"\nThreshold: {threshold}")
+    print(f"Accuracy: {acc:.4f}")
+    print(f"False Positive Rate (FPR): {fpr:.4f}")
+    print(f"False Negative Rate (FNR): {fnr:.4f}")
+    print("\nConfusion Matrix:\n", cm)
+    print("\nClassification Report:\n", classification_report(y_true_bin, y_pred, target_names=["Observe", "Attack"]))
+
+    test_df = full_data[full_data["set_label"] == "test"].copy()
+    test_df.reset_index(drop=True, inplace=True)
+    test_df["predicted_attack"] = y_pred
+    test_df["predicted_probability"] = probs
+    test_df.to_csv(out_predictions_csv, index=False)
+    print(f"Saved predictions CSV: {out_predictions_csv}")
+
+    return y_pred
+
+
+# -----------------------------
+# Inference-time estimation
+# -----------------------------
+def measure_constant_inf_per_point(
+    model: xgb.XGBClassifier,
+    X_test: pd.DataFrame,
+    cfg: InfConfig,
+) -> float:
+    """
+    Estimate a constant inference time per datapoint (seconds/datapoint) using throughput.
+
+    Notes:
+      - On GPU, wall-time measurements can be affected by async execution.
+      - This estimate is intended as a practical constant term for ADL experiments.
+    """
+    n = len(X_test)
+    if n == 0:
+        return 0.0
+
+    warm = X_test.iloc[: min(cfg.warmup_rows, n)]
+    _ = model.predict_proba(warm)[:, 1]
+
+    times: List[float] = []
+    for _ in range(cfg.repeats):
+        t0 = time.perf_counter()
+        p = model.predict_proba(X_test)[:, 1]
+        # Force materialization to reduce timing artifacts
+        _ = float(np.sum(p))
+        t1 = time.perf_counter()
+        times.append((t1 - t0) / n)
+
+    inf_s = float(np.median(times))
+    print(f"INF_const: {inf_s:.6e} s/point  ({inf_s*1e6:.3f} µs/point)")
+    return inf_s
+
+def _fmt_ms_or_us(ms: float, ms_decimals: int = 3, us_decimals: int = 3) -> str:
+    """
+    Format a latency value stored in milliseconds as either:
+      - "<x> ms" (default)
+      - "<y> µs" if it would be misleadingly tiny in ms
+
+    Returns "N/A" for NaN.
+    """
+    if ms is None or (isinstance(ms, float) and np.isnan(ms)):
+        return "N/A"
+
+    ms = float(ms)
+    # If < 0.001 ms, display in microseconds
+    if ms < 0.001 and ms > 0:
+        us = ms * 1000.0
+        return f"{us:.{us_decimals}f} µs"
+    return f"{ms:.{ms_decimals}f} ms"
+
+# -----------------------------
+# ADL computation 
+# -----------------------------
+def calculate_adl(
+    test_data,
+    y_test,
+    y_pred,
+    INF_const_s,
+    threshold=0.5,
+    det_csv_path="/home/sandy/Cybersecurity/ROSPaCe_dataset_attackSpecificInsights/detection_indices.csv"
+):
+    """
+    Compute Attack Detection Latency (ADL) per attack subsegment using:
+
+        ADL = (ACT_detected - ACT_start) + k * INF_const_s
+
+    Units:
+      - ACT_* comes from timestamp differences (seconds)
+      - INF_const_s is seconds per datapoint
+      - Internally ADL is computed in milliseconds, then formatted as "<x> ms" or "<y> µs"
+
+    Outputs:
+      - det_csv_path: CSV with (subsegment_id, label, det_idx)
+      - returns:
+          summary_df: per-class summary with total_subsegments and detected_subsegments
+          events_df:  per-subsegment details (raw numeric fields in ms)
+          det_df:     detection index table written to CSV
+    """
+    df = test_data.copy()
+    df["timestamp"] = pd.to_datetime(df["timestamp"], errors="raise")
+
+    # Assign by position to avoid index alignment NaNs
+    df["true_label"] = np.asarray(y_test)
+    df["predicted"] = np.asarray(y_pred)
+    df.reset_index(drop=True, inplace=True)
+
+    if len(df) != len(y_test) or len(df) != len(y_pred):
+        raise ValueError(f"Length mismatch: df={len(df)}, y_test={len(y_test)}, y_pred={len(y_pred)}")
+
+    # Per-attack-category datapoint-level "accuracy" (recall/TPR)
+    per_class_acc = {}
+    for c in range(1, 7):
+        mask = (df["true_label"] == c)
+        denom = int(mask.sum())
+        per_class_acc[c] = float((df.loc[mask, "predicted"] == 1).mean()) if denom > 0 else np.nan
+
+    # Track ADL per detected attack subsegment (stored in ms)
+    latencies_by_class_ms = {c: [] for c in range(1, 7)}
+
+    # Track total attack subsegments per class (detected or missed)
+    total_subsegments_by_class = {c: 0 for c in range(1, 7)}
+
+    events = []
+    det_rows = []
+
+    inf_const_ms_per_point = float(INF_const_s) * 1000.0
+    inf_const_us_per_point = float(INF_const_s) * 1e6
+
+    i = 0
+    subsegment_id = 0
+
+    while i < len(df):
+        current_label = df.loc[i, "true_label"]
+        start_idx = int(i)
+
+        # Advance to end of contiguous subsegment
+        while i < len(df) and df.loc[i, "true_label"] == current_label:
+            i += 1
+        end_idx = int(i)  # non-inclusive
+        subsegment_id += 1
+
+        # Ignore observe segments for ADL stats
+        if current_label == 0:
+            continue
+
+        attack_class = int(current_label)
+        total_subsegments_by_class[attack_class] += 1
+
+        start_time = df.loc[start_idx, "timestamp"]
+        subsegment = df.iloc[start_idx:end_idx]
+        first_det = subsegment[subsegment["predicted"] == 1].head(1)
+
+        if not first_det.empty:
+            det_idx = int(first_det.index[0])
+            detect_time = df.loc[det_idx, "timestamp"]
+
+            act_latency_ms = (detect_time - start_time).total_seconds() * 1000.0
+            k = det_idx - start_idx + 1
+            inf_sum_ms = k * inf_const_ms_per_point
+            adl_ms = act_latency_ms + inf_sum_ms
+
+            latencies_by_class_ms[attack_class].append(adl_ms)
+
+            events.append({
+                "subsegment_id": subsegment_id,
+                "attack_class": attack_class,
+                "start_idx": start_idx,
+                "end_idx": end_idx,
+                "det_idx": det_idx,
+                "start_time": start_time,
+                "detect_time": detect_time,
+                "detection_offset_points": det_idx - start_idx,
+                "k_points_in_sum": k,
+                "ACT_latency_ms": act_latency_ms,
+                "INF_const_us_per_point": inf_const_us_per_point,
+                "INF_sum_ms": inf_sum_ms,
+                "ADL_ms": adl_ms,
+                "subsegment_len_points": end_idx - start_idx
+            })
+
+            det_rows.append({
+                "subsegment_id": subsegment_id,
+                "label": attack_class,
+                "det_idx": det_idx
+            })
+
+        else:
+            # Missed detection
+            events.append({
+                "subsegment_id": subsegment_id,
+                "attack_class": attack_class,
+                "start_idx": start_idx,
+                "end_idx": end_idx,
+                "det_idx": np.nan,
+                "start_time": start_time,
+                "detect_time": pd.NaT,
+                "detection_offset_points": np.nan,
+                "k_points_in_sum": np.nan,
+                "ACT_latency_ms": np.nan,
+                "INF_const_us_per_point": inf_const_us_per_point,
+                "INF_sum_ms": np.nan,
+                "ADL_ms": np.nan,
+                "subsegment_len_points": end_idx - start_idx
+            })
+
+            det_rows.append({
+                "subsegment_id": subsegment_id,
+                "label": attack_class,
+                "det_idx": np.nan
+            })
+
+    # Write requested CSV (subsegment_id, label, det_idx)
+    det_df = pd.DataFrame(det_rows)
+    det_df.to_csv(det_csv_path, index=False)
+    print(f"Saved detection indices CSV to: {det_csv_path}")
+
+    events_df = pd.DataFrame(events)
+
+    # Summary table (ADL columns only: avg_adl/max_adl/std_adl with units)
+    stats = {}
+    for cls in range(1, 7):
+        acc = per_class_acc[cls]
+        total_subsegs = int(total_subsegments_by_class[cls])
+        vals = np.array(latencies_by_class_ms[cls], dtype=float)
+
+        detected_subsegs = int(len(vals))
+
+        # ADL is N/A only when accuracy=0% (or no detections recorded)
+        if np.isnan(acc) or acc == 0.0 or detected_subsegs == 0:
+            stats[cls] = {
+                "class_name": f"Attack {cls}",
+                "accuracy_percent": 0.0 if (np.isnan(acc) or acc == 0.0) else round(100.0 * float(acc), 2),
+                "total_subsegments": total_subsegs,
+                "detected_subsegments": 0,
+                "inf_const_us_per_point": round(inf_const_us_per_point, 6),
+                "avg_adl": "N/A",
+                "max_adl": "N/A",
+                "std_adl": "N/A",
+            }
+            continue
+
+        avg_ms = float(np.mean(vals))
+        max_ms = float(np.max(vals))
+        std_ms = float(np.std(vals))
+
+        stats[cls] = {
+            "class_name": f"Attack {cls}",
+            "accuracy_percent": round(100.0 * float(acc), 2),
+            "total_subsegments": total_subsegs,
+            "detected_subsegments": detected_subsegs,
+            "inf_const_us_per_point": round(inf_const_us_per_point, 6),
+            "avg_adl": _fmt_ms_or_us(avg_ms, ms_decimals=3, us_decimals=3),
+            "max_adl": _fmt_ms_or_us(max_ms, ms_decimals=3, us_decimals=3),
+            "std_adl": _fmt_ms_or_us(std_ms, ms_decimals=3, us_decimals=3),
+        }
+
+    summary_df = pd.DataFrame.from_dict(stats, orient="index")
+
+    print("\nPer-class summary:\n")
+    print(summary_df[[
+        "class_name",
+        "accuracy_percent",
+        "total_subsegments",
+        "detected_subsegments",
+        "inf_const_us_per_point",
+        "avg_adl",
+        "max_adl",
+        "std_adl",
+    ]])
+
+    return summary_df, events_df, det_df
+
+
+# -----------------------------
+# Entry point
+# -----------------------------
+def main() -> None:
+    cfg = TrainConfig()
+    paths = Paths()
+    inf_cfg = InfConfig()
+
+    print("xgboost:", xgb.__version__)
+    print("xgboost config:", xgb.get_config())
+
+    data = load_folder_csvs(paths.input_folder)
+    X_train, y_train, X_val, y_val, X_test, y_test = split_data(data, cfg, debug=True)
+
+    model = train_xgb(X_train, y_train, X_val, y_val)
+
+    y_pred = evaluate_model(
+        model=model,
+        X_test=X_test,
+        y_test_multiclass=y_test,
+        threshold=cfg.threshold,
+        full_data=data,
+        out_predictions_csv=paths.out_predictions_csv,
+    )
+
+    inf_const_s = measure_constant_inf_per_point(model, X_test, inf_cfg)
+
+    # Build aligned test_data for latency computation
+    test_data = data[data["set_label"] == "test"].copy()
+    test_data.reset_index(drop=True, inplace=True)
+
+    summary_df, events_df, det_df = calculate_adl(
+        test_data=test_data,
+        y_test=y_test, #Attack class info is preserved
+        y_pred_binary=y_pred,
+        inf_const_s=inf_const_s,
+        out_detidx_csv=paths.out_detidx_csv,
+    )
+
+    events_df.to_csv(paths.out_events_csv, index=False)
+    print(f"Saved detection events CSV: {paths.out_events_csv}")
+
+    print("Booster attributes:", model.get_booster().attributes())
+
+
+if __name__ == "__main__":
+    main()
