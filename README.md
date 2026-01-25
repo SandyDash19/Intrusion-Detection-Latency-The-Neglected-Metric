@@ -1,6 +1,4 @@
 # Intrusion-Detection-Latency-The-Neglected-Metric
-This code is for the results in table 7 in the paper Intrusion Detection Latency: The Neglected Metric.
-
 Attack Detection Latency (ADL) Evaluation on ROSPaCe
 
 This repository contains code to compute Attack Detection Latency (ADL) for network-based intrusion detection using the ROSPaCe dataset and an Extreme Gradient Boosting (XGBoost) classifier.
@@ -9,11 +7,12 @@ The implementation supports per-attack-instance latency analysis, enabling evalu
 
 **Overview**
 
-Dataset: ROSPaCe (feature engineering already performed; see paper for details)
+Dataset: ROSPaCe (feature engineering already performed; see paper for details). Get the dataset from here: https://zenodo.org/records/18364329
 
 Classifier: Extreme Gradient Boosting (XGBoost)
 
 Task: Binary classification (Observe vs. Attack) with per-class latency evaluation
+This code is for the results in table 7 in the paper Intrusion Detection Latency: The Neglected Metric.
 
 Scale:
 
