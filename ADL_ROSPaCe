@@ -556,9 +556,10 @@ def main() -> None:
     summary_df, events_df, det_df = calculate_adl(
         test_data=test_data,
         y_test=y_test, #Attack class info is preserved
-        y_pred_binary=y_pred,
-        inf_const_s=inf_const_s,
-        out_detidx_csv=paths.out_detidx_csv,
+        y_pred=y_pred, #Binary prediction
+        INF_const_s=inf_const_s,
+        threshold=cfg.threshold,
+        det_csv_path=paths.out_detidx_csv,
     )
 
     events_df.to_csv(paths.out_events_csv, index=False)
