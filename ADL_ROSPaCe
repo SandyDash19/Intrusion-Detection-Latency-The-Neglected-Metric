@@ -3,6 +3,7 @@ Attack Detection Latency calculation using
 dataset: ROSPaCe, feature engineering is already performed. Feature engineering details
          are mentioned in the paper.
 classifier: Extreme Gradient Boosting Algorithm XGBoost 
+Input and output files: Add path to input folder
 
 Types of attack categories and labels:
 Label    Attack Category
@@ -81,10 +82,10 @@ from sklearn.metrics import accuracy_score, classification_report, confusion_mat
 # -----------------------------
 @dataclass(frozen=True)
 class Paths:
-    input_folder: str = "/home/sandy/Cybersecurity/ROSPaCe_dataset_attackSpecificInsights/Task2_input"
-    out_predictions_csv: str = "/home/sandy/Cybersecurity/ROSPaCe_dataset_attackSpecificInsights/test_data_with_predictions.csv"
-    out_detidx_csv: str = "/home/sandy/Cybersecurity/ROSPaCe_dataset_attackSpecificInsights/subseg_label_detidx.csv"
-    out_events_csv: str = "/home/sandy/Cybersecurity/ROSPaCe_dataset_attackSpecificInsights/detection_events.csv"
+    input_folder: str = "<path to input folder>"
+    out_predictions_csv: str = "test_data_with_predictions.csv"
+    out_detidx_csv: str = "subseg_label_detidx.csv"
+    out_events_csv: str = "detection_events.csv"
 
 
 @dataclass(frozen=True)
