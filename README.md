@@ -69,8 +69,6 @@ INF_const is a constant per-datapoint inference time estimated from throughput
 
 Inference time is measured by timing batch inference over the test set and averaging across 5 runs.
 
-nference time is measured by timing batch inference over the test set and averaging across 5 runs.
-
 Outputs
 
 The script produces the following artifacts:
