@@ -5,13 +5,18 @@ This repository contains code to compute Attack Detection Latency (ADL) for netw
 
 The implementation supports per-attack-instance latency analysis, enabling evaluation beyond traditional accuracy-only metrics.
 
+**Instructions to use this repo**
+Download dataset: https://zenodo.org/records/18364329
+Add path to the dataset in the ADL_ROSPaCe.py
+This is ROSPaCe dataset after three feature engineering steps described in our paper.
+
 **Overview**
 
 Dataset: ROSPaCe (feature engineering already performed; see paper for details). Get the dataset from here: https://zenodo.org/records/18364329
 
 Classifier: Extreme Gradient Boosting (XGBoost)
 
-Task: Binary classification (Observe vs. Attack) with per-class latency evaluation
+Task: Binary classification (Observe vs. Attack) for each datapoint with per-class latency evaluation
 This code is for the results in table 7 in the paper Intrusion Detection Latency: The Neglected Metric.
 
 Scale:
@@ -32,7 +37,8 @@ Attack Categories
 |     5 | nmap_SYN_flood       |
 |     6 | metasploit_SYN_flood |
 
-What the Code Does
+
+**What the Code Does**
 
 The script trains an XGBoost binary classifier (observe vs. attack) and evaluates:
 
