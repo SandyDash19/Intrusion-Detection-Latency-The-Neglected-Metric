@@ -7,7 +7,7 @@ This repository contains code to compute Attack Detection Latency (ADL) for netw
 
 The implementation supports per-attack-instance latency analysis, enabling evaluation beyond traditional accuracy-only metrics.
 
-Overview
+**Overview**
 
 Dataset: ROSPaCe (feature engineering already performed; see paper for details)
 
@@ -37,13 +37,13 @@ What the Code Does
 
 The script trains an XGBoost binary classifier (observe vs. attack) and evaluates:
 
-1. Classification Metrics
+**1. Classification Metrics**
 
 Binary accuracy, FPR, FNR on the test set
 
 Per-attack-category datapoint-level accuracy (TPR / recall)
 
-2. Detection Index per Attack Subsegment
+**2. Detection Index per Attack Subsegment**
 
 For each attack subsegment in the test set, the code records:
 
@@ -51,11 +51,11 @@ the global datapoint index (det_idx) at which the attack is first detected
 
 subsegments may span hundreds of thousands of datapoints
 
-3. Attack Detection Latency (ADL)
+**3. Attack Detection Latency (ADL)**
 
 For each successfully detected attack subsegment, ADL is computed as:
 
-The Attack Detection Latency is computed as:
+**The Attack Detection Latency is computed as:**
 
 ADL_ms = (ACT_detected − ACT_start)_ms + k · INF_const,ms
 ​
@@ -71,7 +71,7 @@ Inference time is measured by timing batch inference over the test set and avera
 
 Outputs
 
-The script produces the following artifacts:
+**The script produces the following artifacts:**
 
 (1) test_data_with_predictions.csv
 
@@ -138,7 +138,7 @@ For each attack category, the code prints a summary table with the following col
 
 Latency values are displayed with units attached (ms or µs depending on magnitude).
 
-Important Notes
+**Important Notes**
 
 The XGBoost model fails to detect attacks in the following categories:
 
@@ -156,7 +156,7 @@ XGBoost inference complexity does not depend on packet content
 
 GPU inference timing is estimated via throughput and may be affected by asynchronous execution; results should be interpreted accordingly.
 
-Citation
+**Citation**
 
 If you use this code or the produced artifacts, please cite the accompanying paper:
 
@@ -165,6 +165,6 @@ Authors: Sandhyarani Dash, John M. Acken
 Affiliation: Portland State University
 Journal:Cybersecurity, Springer Nature
 
-Disclaimer
+**Disclaimer**
 
 This repository is intended as a research artifact to support reproducibility of Attack Detection Latency analysis.
