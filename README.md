@@ -1,4 +1,11 @@
 # Intrusion-Detection-Latency-The-Neglected-Metric
+
+📄 **Paper:**  
+S. Dash and J. M. Acken, “Intrusion detection latency: The neglected metric,” *Cybersecurity*, vol. 9, Art. no. 144, 2026.  
+DOI: https://doi.org/10.1186/s42400-026-00574-7
+link : https://link.springer.com/article/10.1186/s42400-026-00574-7?utm_source=rct_congratemailt&utm_medium=email&utm_campaign=oa_20260325&utm_content=10.1186%2Fs42400-026-00574-7
+
+# Intrusion-Detection-Latency-The-Neglected-Metric
 Attack Detection Latency (ADL) Evaluation on ROSPaCe
 
 This repository contains code to compute Attack Detection Latency (ADL) for network-based intrusion detection using the ROSPaCe dataset and an Extreme Gradient Boosting (XGBoost) classifier.
@@ -164,11 +171,7 @@ GPU inference timing is estimated via throughput and may be affected by asynchro
 **Citation**
 
 If you use this code or the produced artifacts, please cite the accompanying paper:
-
-Paper Title: Intrusion Detection Latency: The Neglected Metric
-Authors: Sandhyarani Dash, John M. Acken
-Affiliation: Portland State University
-Journal:Cybersecurity, Springer Nature
+S. Dash and J. M. Acken, “Intrusion detection latency: The neglected metric,” Cybersecurity, vol. 9, p. 144, 2026, doi: 10.1186/s42400-026-00574-7.
 
 **Disclaimer**
 
